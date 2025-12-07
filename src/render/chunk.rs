@@ -141,6 +141,9 @@ fn generate_voxels(chunk_x: i64, chunk_z: i64) -> (Vec<VoxelVertex>, Vec<u32>) {
                     debug_assert!(*y >= 0);
                     debug_assert!(*z >= 0);
                     vertex.offset(glam::UVec3::new(*x as u32, *y as u32, *z as u32));
+                    if *y > 50 {
+                        vertex.set_color(1);
+                    }
                     vertices.push(vertex);
                 }
                 for index in VOXEL_FACES_INDICES[*face_idx].iter() {

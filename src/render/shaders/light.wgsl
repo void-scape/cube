@@ -25,10 +25,10 @@ struct VertexOutput {
 fn vs_main(
     in: VertexInput,
 ) -> VertexOutput {
-	let x = f32(in.packed & 0x1f);
-	let y = f32((in.packed >> 5) & 0xff);
-	let z = f32((in.packed >> 13) & 0x1f);
-	let color_index = (in.packed >> 21) & 1;
+	let x = f32(in.packed & 0x3f);
+	let y = f32((in.packed >> 6) & 0xff);
+	let z = f32((in.packed >> 14) & 0x3f);
+	let color_index = (in.packed >> 23) & 1;
 
 	const COLORS = array<vec3<f32>, 2>(
 		vec3(1.0, 1.0, 1.0),
@@ -36,7 +36,7 @@ fn vs_main(
 	);
 
     var out: VertexOutput;
-    out.clip_position = camera.proj * camera.view * vec4(light.position + vec3(x, y, z) * 2.0, 1.0);
+    out.clip_position = camera.proj * camera.view * vec4(light.position + vec3(x, y, z), 1.0);
 	out.color = COLORS[color_index];
     return out;
 }

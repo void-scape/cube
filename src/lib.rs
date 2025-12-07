@@ -72,7 +72,7 @@ pub fn update_and_render(
 
     let world = memory.world.get_or_insert_with(|| World {
         camera: camera::Camera {
-            translation: glam::Vec3::new(0.0, 80.0, -2.0),
+            translation: glam::Vec3::new(0.0, 100.0, -2.0),
             pitch: -0.97,
             yaw: 0.97,
             fov: 90f32.to_radians(),

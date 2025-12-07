@@ -11,27 +11,46 @@ use wgpu::util::DeviceExt;
 
 // Pre-shrinkification process memory usage sits at ~39MB.
 // valgrind sits at roughly 13,626,576b heap allocation.
+//
+// Pose-shrinkification process memory sits at ~35.5MB.
+// valgrind sits at roughly 27,962,600b heap allocation.
+//
+// I don't think I am using valgrind correctly lol.
+//
+// Seems to almost double performance? The fps measurement is
+// not very scientific, but it seems like it went from ~450 to ~750.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VoxelVertex {
     /// color_index | normal_index | z | y | x
     /// ---------------------------------------
-    /// 1             3              5   8   5
+    /// 3             3              6   8   6
     packed: u32,
 }
 
 impl VoxelVertex {
     const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32];
 
+    const MAX_XZ: u32 = 63;
+    const MAX_Y: u32 = 255;
+    const Y_OFFSET: u32 = 6;
+    const Z_OFFSET: u32 = 14;
+
+    const NORMAL_OFFSET: u32 = 20;
+
+    const MAX_COLOR_INDEX: u32 = 3;
+    const COLOR_OFFSET: u32 = 23;
+    const COLOR_MASK: u32 = 0x1800000;
+
     pub const fn new(translation: UVec3, normal: Vec3) -> Self {
-        debug_assert!(translation.x <= 31);
-        debug_assert!(translation.y <= 255);
-        debug_assert!(translation.z <= 31);
+        debug_assert!(translation.x <= Self::MAX_XZ);
+        debug_assert!(translation.y <= Self::MAX_Y);
+        debug_assert!(translation.z <= Self::MAX_XZ);
 
         let mut packed = 0;
         packed |= translation.x;
-        packed |= translation.y << 5;
-        packed |= translation.z << 13;
+        packed |= translation.y << Self::Y_OFFSET;
+        packed |= translation.z << Self::Z_OFFSET;
 
         let normal = match normal {
             Vec3::X => 0,
@@ -42,26 +61,32 @@ impl VoxelVertex {
             Vec3::NEG_Z => 5,
             _ => unreachable!(),
         };
-        packed |= normal << 18;
+        packed |= normal << Self::NORMAL_OFFSET;
 
         Self { packed }
     }
 
     pub fn offset(&mut self, translation: UVec3) {
-        debug_assert!(translation.x <= 31);
-        debug_assert!(translation.y <= 255);
-        debug_assert!(translation.z <= 31);
-
         let packed = self.packed;
-        let x = (packed & 0x1f) + translation.x;
-        let y = ((packed >> 5) & 0xff) + translation.y;
-        let z = ((packed >> 13) & 0x1f) + translation.z;
+        let x = (packed & 0x3f) + translation.x;
+        let y = ((packed >> Self::Y_OFFSET) & 0xff) + translation.y;
+        let z = ((packed >> Self::Z_OFFSET) & 0x3f) + translation.z;
 
-        debug_assert!(translation.x <= 31);
-        debug_assert!(translation.y <= 255);
-        debug_assert!(translation.z <= 31);
+        debug_assert!(translation.x <= Self::MAX_XZ);
+        debug_assert!(translation.y <= Self::MAX_Y);
+        debug_assert!(translation.z <= Self::MAX_XZ);
 
-        self.packed = ((packed >> 15) << 15) | (x & 0x1f) | ((y & 0xff) << 5) | ((z & 0x1f) << 13);
+        let remaining = packed & !0xFFFFF;
+        self.packed = remaining
+            | (x & 0x3f)
+            | ((y & 0xff) << Self::Y_OFFSET)
+            | ((z & 0x3f) << Self::Z_OFFSET);
+    }
+
+    pub fn set_color(&mut self, color: u32) {
+        debug_assert!(color <= Self::MAX_COLOR_INDEX);
+        let packed = self.packed & !Self::COLOR_MASK;
+        self.packed = packed | (color << Self::COLOR_OFFSET);
     }
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -145,7 +170,7 @@ impl VoxelPipeline {
         });
 
         let light = Light {
-            position: Vec3::new(-30.0, 60.0, -80.0),
+            position: Vec3::new(-30.0, 120.0, -80.0),
             _pad: 0,
             color: [1.0, 1.0, 1.0],
             _pad2: 0,

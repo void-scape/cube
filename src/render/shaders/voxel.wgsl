@@ -36,11 +36,11 @@ struct VertexOutput {
 fn vs_main(
     in: VertexInput,
 ) -> VertexOutput {
-	let x = f32(in.packed & 0x1f);
-	let y = f32((in.packed >> 5) & 0xff);
-	let z = f32((in.packed >> 13) & 0x1f);
-	let normal_index = (in.packed >> 18) & 3;
-	let color_index = (in.packed >> 21) & 1;
+	let x = f32(in.packed & 0x3f);
+	let y = f32((in.packed >> 6) & 0xff);
+	let z = f32((in.packed >> 14) & 0x3f);
+	let normal_index = (in.packed >> 20) & 7;
+	let color_index = (in.packed >> 23) & 1;
 
 	const NORMALS = array<vec3<f32>, 6>(
 		vec3(1.0, 0.0, 0.0),
@@ -52,8 +52,8 @@ fn vs_main(
 	);
 
 	const COLORS = array<vec3<f32>, 2>(
-		vec3(1.0, 1.0, 1.0),
-		vec3(0.0, 0.0, 0.0),
+		vec3(51.0 / 255.0, 45.0 / 255.0, 35.0 / 255.0),
+		vec3(145.0 / 255.0, 137.0 / 255.0, 125.0 / 255.0),
 	);
 
     var out: VertexOutput;
@@ -73,9 +73,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 	let ambient = light.color * ambient_brightness;
 
 	let light_dir = normalize(light.position - in.world_position);
-	let diffuse_brightness = max(dot(in.world_normal, light_dir), 0.0);
+	let diffuse_brightness = max(dot(normalize(in.world_normal), light_dir), 0.0);
 	let diffuse = light.color * diffuse_brightness;
 
 	let result = (ambient + diffuse) * color;
     return vec4(result, 1.0);
 }
+
+// @fragment
+// fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+// 	let color = in.color;
+// 
+// 	let ambient_brightness = 0.1;
+// 
+// 	let light_dir = normalize(light.position - in.world_position);
+// 	let diffuse_brightness = max(dot(in.world_normal, light_dir), 0.0);
+// 
+// 	let quantized_light = (floor(diffuse_brightness * 8.0) / 8.0 * light.color) + ambient_brightness * light.color;
+// 
+// 	let result = quantized_light * color;
+//     return vec4(result, 1.0);
+// }

@@ -17,11 +17,23 @@ pub struct Camera {
     pub back: bool,
     pub up: bool,
     pub down: bool,
+    pub disabled: bool,
+    pub ortho: bool,
 }
 
 impl Camera {
     pub fn handle_key(&mut self, key: KeyCode, state: ElementState) {
         match key {
+            KeyCode::KeyE => {
+                if state.is_pressed() {
+                    self.disabled = !self.disabled;
+                }
+            }
+            KeyCode::KeyO => {
+                if state.is_pressed() {
+                    self.ortho = !self.ortho;
+                }
+            }
             KeyCode::KeyA => {
                 self.left = state.is_pressed();
             }
@@ -45,32 +57,36 @@ impl Camera {
     }
 
     pub fn handle_mouse(&mut self, dx: f32, dy: f32) {
-        let sensitivity = 0.005;
+        if !self.disabled {
+            let sensitivity = 0.005;
 
-        self.yaw += dx * sensitivity;
-        self.pitch += -dy * sensitivity;
+            self.yaw += dx * sensitivity;
+            self.pitch += -dy * sensitivity;
 
-        if self.pitch < -FRAC_PI_2 + 0.001 {
-            self.pitch = -FRAC_PI_2 + 0.001;
-        } else if self.pitch > FRAC_PI_2 + 0.001 {
-            self.pitch = FRAC_PI_2 + 0.001;
+            if self.pitch < -FRAC_PI_2 + 0.001 {
+                self.pitch = -FRAC_PI_2 + 0.001;
+            } else if self.pitch > FRAC_PI_2 + 0.001 {
+                self.pitch = FRAC_PI_2 + 0.001;
+            }
         }
     }
 
     pub fn update(&mut self, dt: f32) {
-        let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
-        let forward = Vec3::new(yaw_cos, 0.0, yaw_sin).normalize();
-        let right = Vec3::new(-yaw_sin, 0.0, yaw_cos).normalize();
-        let mut dxz = Vec3::ZERO;
-        dxz += forward * (self.forward as u32 as f32 - self.back as u32 as f32);
-        dxz += right * (self.right as u32 as f32 - self.left as u32 as f32);
-        self.translation += dxz.normalize_or_zero() * self.speed * dt;
+        if !self.disabled {
+            let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
+            let forward = Vec3::new(yaw_cos, 0.0, yaw_sin).normalize();
+            let right = Vec3::new(-yaw_sin, 0.0, yaw_cos).normalize();
+            let mut dxz = Vec3::ZERO;
+            dxz += forward * (self.forward as u32 as f32 - self.back as u32 as f32);
+            dxz += right * (self.right as u32 as f32 - self.left as u32 as f32);
+            self.translation += dxz.normalize_or_zero() * self.speed * dt;
 
-        if self.down {
-            self.translation.y -= self.speed * dt;
-        }
-        if self.up {
-            self.translation.y += self.speed * dt;
+            if self.down {
+                self.translation.y -= self.speed * dt;
+            }
+            if self.up {
+                self.translation.y += self.speed * dt;
+            }
         }
     }
 
@@ -85,11 +101,18 @@ impl Camera {
     }
 
     pub fn projection_matrix(&self, width: u32, height: u32) -> Mat4 {
-        Mat4::perspective_rh(
-            self.fov,
-            width as f32 / height as f32,
-            self.znear,
-            self.zfar,
-        )
+        if self.ortho {
+            let scale = 0.1;
+            let w = width as f32 / 2.0 * scale;
+            let h = height as f32 / 2.0 * scale;
+            Mat4::orthographic_rh(-w, w, -h, h, self.znear, self.zfar)
+        } else {
+            Mat4::perspective_rh(
+                self.fov,
+                width as f32 / height as f32,
+                self.znear,
+                self.zfar,
+            )
+        }
     }
 }
