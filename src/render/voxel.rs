@@ -1,6 +1,6 @@
 use crate::{
     camera::Camera,
-    render::{camera::CameraData, chunk::ChunkData, light::LightData},
+    render::{camera::CameraData, chunk::ChunkData, light::LightData, shadow::ShadowData},
 };
 
 pub struct VoxelPipeline {
@@ -8,6 +8,7 @@ pub struct VoxelPipeline {
     chunks: ChunkData,
     camera: CameraData,
     light: LightData,
+    shadow: ShadowData,
 }
 
 impl VoxelPipeline {
@@ -36,13 +37,28 @@ impl VoxelPipeline {
 
         let camera = CameraData::new(device);
         let light = LightData::new(device, surface_format, &camera);
-        let chunks = ChunkData::new(device, surface_format, &camera, &light);
+
+        let shadow_map_bind_group_layout = ShadowData::shadow_map_bind_group_layout(device);
+        let chunks = ChunkData::new(
+            device,
+            surface_format,
+            &camera,
+            &light,
+            &shadow_map_bind_group_layout,
+        );
+        let shadow = ShadowData::new(
+            device,
+            shadow_map_bind_group_layout,
+            surface_format,
+            &chunks,
+        );
 
         Self {
             depth_buffer,
             chunks,
             camera,
             light,
+            shadow,
         }
     }
 
@@ -58,8 +74,9 @@ impl VoxelPipeline {
     ) {
         self.camera.update(queue, width, height, camera);
         self.chunks.update(device, camera);
-        self.light
-            .render(queue, encoder, view, &self.depth_buffer, &self.camera);
+
+        self.light.prepare_render_pass(queue, camera);
+        self.shadow.prepare_render_pass(queue, &self.light);
         self.chunks.render(
             device,
             queue,
@@ -68,6 +85,10 @@ impl VoxelPipeline {
             &self.depth_buffer,
             &self.camera,
             &self.light,
+            &self.shadow,
         );
+        self.light
+            .debug_render(encoder, view, &self.depth_buffer, &self.camera);
+        self.shadow.debug_render(encoder, view);
     }
 }

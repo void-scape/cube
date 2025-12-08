@@ -5,6 +5,7 @@ struct Camera {
 var<uniform> camera: Camera;
 
 struct Light {
+	proj_view: mat4x4<f32>,
     position: vec3<f32>,
     color: vec3<f32>,
 };
@@ -17,6 +18,11 @@ struct Chunk {
 @group(2) @binding(0)
 var<uniform> chunk: Chunk;
 
+@group(3) @binding(0)
+var shadow_map: texture_depth_2d; 
+@group(3) @binding(1)
+var shadow_map_sampler: sampler_comparison; 
+
 struct VertexInput {
     /// color_index | normal_index | z | y | x
     /// ---------------------------------------
@@ -26,9 +32,10 @@ struct VertexInput {
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_normal: vec3<f32>,
-    @location(1) world_position: vec3<f32>,
-    @location(2) color: vec3<f32>,
+	@location(0) light_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) world_position: vec3<f32>,
+    @location(3) color: vec3<f32>,
 };
 
 @vertex
@@ -58,6 +65,13 @@ fn vs_main(
     var out: VertexOutput;
 	let model_position = vec3(x, y, z) + chunk.position;
     out.clip_position = camera.proj_view * vec4(model_position, 1.0);
+
+	let light_position = light.proj_view * vec4(model_position, 1.0);
+	out.light_position = vec3(
+	  light_position.xy * vec2(0.5, -0.5) + vec2(0.5),
+	  light_position.z
+	);
+
 	out.world_position = model_position;
 	out.world_normal = NORMALS[normal_index];
 	out.color = COLORS[color_index];
@@ -67,29 +81,38 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 	let color = in.color;
+	let normal = normalize(in.world_normal);
 
-	let ambient_brightness = 0.1;
+	let ambient_brightness = 0.15;
 	let ambient = light.color * ambient_brightness;
 
 	let light_dir = normalize(light.position - in.world_position);
-	let diffuse_brightness = max(dot(normalize(in.world_normal), light_dir), 0.0);
+	let diffuse_brightness = max(dot(normal, light_dir), 0.0);
 	let diffuse = light.color * diffuse_brightness;
 
-	let result = (ambient + diffuse) * color;
-    return vec4(result, 1.0);
-}
+	let bias = max(0.02 * (1.0 - dot(normal, light_dir)), 0.002);
+    // let shadow = textureSampleCompare(
+    //   shadow_map, shadow_map_sampler,
+    //   in.light_position.xy, in.light_position.z - bias
+    // );
 
-// @fragment
-// fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-// 	let color = in.color;
-// 
-// 	let ambient_brightness = 0.1;
-// 
-// 	let light_dir = normalize(light.position - in.world_position);
-// 	let diffuse_brightness = max(dot(in.world_normal, light_dir), 0.0);
-// 
-// 	let quantized_light = (floor(diffuse_brightness * 8.0) / 8.0 * light.color) + ambient_brightness * light.color;
-// 
-// 	let result = quantized_light * color;
-//     return vec4(result, 1.0);
-// }
+	// TODO: This doesn't do shit about the aliasing.
+	var shadow = 0.0;
+	let texel_size = 1.0 / 1024.0;
+	for (var x = -1; x <= 1; x += 1) {
+		for (var y = -1; y <= 1; y += 1) {
+			shadow += textureSampleCompare(
+			    shadow_map, shadow_map_sampler,
+			    in.light_position.xy + vec2(f32(x), f32(y)), 
+				in.light_position.z - bias,
+			); 
+		}    
+	}
+	shadow /= 9.0;
+
+	let buckets = 9.0;
+	let light = ambient + shadow * diffuse;
+ 	let quantized_light = floor(light * buckets) / buckets;
+
+    return vec4(quantized_light * color, 1.0);
+}

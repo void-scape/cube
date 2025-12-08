@@ -76,7 +76,7 @@ pub fn update_and_render(
             pitch: -0.80,
             yaw: -2.1,
             fov: 90f32.to_radians(),
-            znear: 0.1,
+            znear: 0.01,
             zfar: 1000.0,
             speed: 100.0,
             ..Default::default()

@@ -1,19 +1,23 @@
-use crate::render::{
-    byte_slice,
-    camera::CameraData,
-    vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
+use crate::{
+    camera::Camera,
+    render::{
+        byte_slice,
+        camera::CameraData,
+        vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
+    },
 };
-use glam::{Quat, Vec3};
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 // NOTE: Uniforms require 16 byte spacing
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LightUniform {
-    position: Vec3,
-    _pad: u32,
-    color: [f32; 3],
-    _pad2: u32,
+    pub proj_view: Mat4,
+    pub position: Vec3,
+    pub _pad: u32,
+    pub color: [f32; 3],
+    pub _pad2: u32,
 }
 
 pub struct LightData {
@@ -21,7 +25,7 @@ pub struct LightData {
     pub uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
-    // Debug light source
+    // debug renderer
     pub pipeline: wgpu::RenderPipeline,
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
@@ -34,7 +38,8 @@ impl LightData {
         camera_data: &CameraData,
     ) -> Self {
         let light = LightUniform {
-            position: Vec3::new(-30.0, 120.0, -80.0),
+            proj_view: Mat4::IDENTITY,
+            position: Vec3::new(-100.0, 250.0, -100.0),
             _pad: 0,
             color: [1.0, 1.0, 1.0],
             _pad2: 0,
@@ -91,12 +96,12 @@ impl LightData {
         });
         let shader = wgpu::ShaderModuleDescriptor {
             label: Some("light shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/light.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/debug_light.wgsl").into()),
         };
         let pipeline = crate::render::create_render_pipeline(
             device,
             &layout,
-            surface_format,
+            Some(surface_format),
             Some(wgpu::TextureFormat::Depth32Float),
             &[VoxelVertex::desc()],
             shader,
@@ -113,26 +118,28 @@ impl LightData {
         }
     }
 
-    pub fn render(
-        &mut self,
-        queue: &wgpu::Queue,
+    pub fn prepare_render_pass(&mut self, queue: &wgpu::Queue, camera: &Camera) {
+        // let old_position = self.light.position;
+        // self.light.position =
+        //     Quat::from_axis_angle((0.0, 1.0, 0.0).into(), 0.01f32.to_radians()) * old_position;
+        self.light.proj_view = self.view_proj(camera);
+        queue.write_buffer(&self.uniform, 0, byte_slice(&[self.light]));
+    }
+
+    pub fn debug_render(
+        &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         depth_buffer: &wgpu::TextureView,
         camera: &CameraData,
     ) {
-        let old_position = self.light.position;
-        self.light.position =
-            Quat::from_axis_angle((0.0, 1.0, 0.0).into(), 0.01f32.to_radians()) * old_position;
-        queue.write_buffer(&self.uniform, 0, byte_slice(&[self.light]));
-
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("debug light render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -140,7 +147,7 @@ impl LightData {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_buffer,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -154,5 +161,14 @@ impl LightData {
         render_pass.set_vertex_buffer(0, self.vertices.slice(..));
         render_pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..36, 0, 0..1);
+    }
+
+    fn view_proj(&self, _camera: &Camera) -> Mat4 {
+        let size = 90.0;
+        Mat4::orthographic_rh(-size, size, -size, size, 140.0, 350.0).mul_mat4(&Mat4::look_at_rh(
+            self.light.position,
+            Vec3::ZERO,
+            Vec3::Y,
+        ))
     }
 }

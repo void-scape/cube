@@ -5,6 +5,7 @@ use crate::{
         byte_slice,
         camera::CameraData,
         light::LightData,
+        shadow::ShadowData,
         vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
     },
 };
@@ -16,6 +17,7 @@ use std::{
 use wgpu::util::DeviceExt;
 
 pub const CHUNK_SIZE: usize = 32;
+pub const VIEW_DISTANCE: usize = 4;
 
 #[repr(C)]
 pub struct ChunkUniform {
@@ -28,6 +30,7 @@ pub struct ChunkData {
     pub chunks: HashMap<(i64, i64), Chunk>,
     pub uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
     pub uniform_buffer: Vec<u8>,
 }
 
@@ -37,13 +40,15 @@ impl ChunkData {
         surface_format: wgpu::TextureFormat,
         camera: &CameraData,
         light: &LightData,
+        shadow_map_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // TODO: The size of this buffer will depend on the devices `min_uniform_buffer_offset_alignment`.
         // Also, changing the number of chunks rendered would require resizing this buffer.
-        let uniform_buffer = Vec::with_capacity(std::mem::size_of::<ChunkUniform>() * 4 * 4 * 256);
+        let size = (VIEW_DISTANCE * VIEW_DISTANCE * VIEW_DISTANCE * 10) * 256;
+        let uniform_buffer = Vec::with_capacity(size);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chunk uniform"),
-            size: std::mem::size_of::<ChunkUniform>() as wgpu::BufferAddress * 4 * 4 * 256,
+            size: size as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -84,6 +89,7 @@ impl ChunkData {
                     &camera.bind_group_layout,
                     &light.bind_group_layout,
                     &bind_group_layout,
+                    shadow_map_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -91,7 +97,7 @@ impl ChunkData {
         let pipeline = crate::render::create_render_pipeline(
             device,
             &render_pipeline_layout,
-            surface_format,
+            Some(surface_format),
             Some(wgpu::TextureFormat::Depth32Float),
             &[VoxelVertex::desc()],
             shader,
@@ -102,19 +108,18 @@ impl ChunkData {
             chunks: Default::default(),
             uniform,
             bind_group,
+            bind_group_layout,
             uniform_buffer,
         }
     }
 
     pub fn update(&mut self, device: &wgpu::Device, camera: &Camera) {
-        let view_distance = 4;
-
         let (x, z) = (
             camera.translation.x as i64 / CHUNK_SIZE as i64,
             camera.translation.z as i64 / CHUNK_SIZE as i64,
         );
-        let zrange = z - view_distance..=z + view_distance;
-        let xrange = x - view_distance..=x + view_distance;
+        let zrange = z - VIEW_DISTANCE as i64..=z + VIEW_DISTANCE as i64;
+        let xrange = x - VIEW_DISTANCE as i64..=x + VIEW_DISTANCE as i64;
 
         self.chunks
             .retain(|(x, z), _| xrange.contains(x) && zrange.contains(z));
@@ -159,33 +164,9 @@ impl ChunkData {
         depth_buffer: &wgpu::TextureView,
         camera: &CameraData,
         light: &LightData,
+        shadow: &ShadowData,
     ) {
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("voxel render pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_buffer,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &camera.bind_group, &[]);
-        render_pass.set_bind_group(1, &light.bind_group, &[]);
-
+        // upload chunk data to gpu
         let padding = device.limits().min_uniform_buffer_offset_alignment as usize
             - std::mem::size_of::<ChunkUniform>();
 
@@ -203,14 +184,74 @@ impl ChunkData {
         }
         queue.write_buffer(&self.uniform, 0, byte_slice(&self.uniform_buffer));
 
-        let stride = device.limits().min_uniform_buffer_offset_alignment;
-        for (i, chunk) in self.chunks.values().enumerate() {
-            let offset = i as wgpu::DynamicOffset * stride;
-            render_pass.set_bind_group(2, &self.bind_group, &[offset]);
+        // render to shadow map first
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow render pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &shadow.shadow_map,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
 
-            render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-            render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            render_pass.set_pipeline(&shadow.pipeline);
+            render_pass.set_bind_group(0, &shadow.bind_group, &[]);
+
+            let stride = device.limits().min_uniform_buffer_offset_alignment;
+            for (i, chunk) in self.chunks.values().enumerate() {
+                let offset = i as wgpu::DynamicOffset * stride;
+                render_pass.set_bind_group(1, &self.bind_group, &[offset]);
+
+                render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            }
+        }
+
+        // then do normal render pass
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("voxel render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_buffer,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &camera.bind_group, &[]);
+            render_pass.set_bind_group(1, &light.bind_group, &[]);
+            render_pass.set_bind_group(3, &shadow.shadow_map_bind_group, &[]);
+
+            let stride = device.limits().min_uniform_buffer_offset_alignment;
+            for (i, chunk) in self.chunks.values().enumerate() {
+                let offset = i as wgpu::DynamicOffset * stride;
+                render_pass.set_bind_group(2, &self.bind_group, &[offset]);
+
+                render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            }
         }
     }
 }
