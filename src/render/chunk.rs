@@ -3,19 +3,109 @@ use crate::{
     platform::debug,
     render::{
         byte_slice,
-        voxel::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
+        camera::CameraData,
+        light::LightData,
+        vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
     },
 };
-use glam::{FloatExt, Vec2};
-use std::collections::{HashMap, HashSet};
+use glam::{FloatExt, Vec2, Vec3};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU64,
+};
 use wgpu::util::DeviceExt;
 
 pub const CHUNK_SIZE: usize = 32;
 
-#[derive(Default)]
-pub struct Chunks(pub HashMap<(i64, i64), Chunk>);
+#[repr(C)]
+pub struct ChunkUniform {
+    position: Vec3,
+    _pad: u32,
+}
 
-impl Chunks {
+pub struct ChunkData {
+    pub pipeline: wgpu::RenderPipeline,
+    pub chunks: HashMap<(i64, i64), Chunk>,
+    pub uniform: wgpu::Buffer,
+    pub bind_group: wgpu::BindGroup,
+    pub uniform_buffer: Vec<u8>,
+}
+
+impl ChunkData {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        camera: &CameraData,
+        light: &LightData,
+    ) -> Self {
+        // TODO: The size of this buffer will depend on the devices `min_uniform_buffer_offset_alignment`.
+        // Also, changing the number of chunks rendered would require resizing this buffer.
+        let uniform_buffer = Vec::with_capacity(std::mem::size_of::<ChunkUniform>() * 4 * 4 * 256);
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("chunk uniform"),
+            size: std::mem::size_of::<ChunkUniform>() as wgpu::BufferAddress * 4 * 4 * 256,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk bind group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform,
+                    offset: 0,
+                    size: Some(
+                        NonZeroU64::new(std::mem::size_of::<ChunkUniform>() as u64).unwrap(),
+                    ),
+                }),
+            }],
+        });
+
+        let shader = wgpu::include_wgsl!("shaders/voxel.wgsl");
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("voxel pipeline layout"),
+                bind_group_layouts: &[
+                    &camera.bind_group_layout,
+                    &light.bind_group_layout,
+                    &bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = crate::render::create_render_pipeline(
+            device,
+            &render_pipeline_layout,
+            surface_format,
+            Some(wgpu::TextureFormat::Depth32Float),
+            &[VoxelVertex::desc()],
+            shader,
+        );
+
+        Self {
+            pipeline,
+            chunks: Default::default(),
+            uniform,
+            bind_group,
+            uniform_buffer,
+        }
+    }
+
     pub fn update(&mut self, device: &wgpu::Device, camera: &Camera) {
         let view_distance = 4;
 
@@ -26,7 +116,7 @@ impl Chunks {
         let zrange = z - view_distance..=z + view_distance;
         let xrange = x - view_distance..=x + view_distance;
 
-        self.0
+        self.chunks
             .retain(|(x, z), _| xrange.contains(x) && zrange.contains(z));
 
         let (dur, out) = debug::debug_time_millis(|| {
@@ -35,7 +125,7 @@ impl Chunks {
                 let mut handles = Vec::with_capacity(count);
                 'outer: for z in zrange.clone() {
                     for x in xrange.clone() {
-                        if !self.0.contains_key(&(x, z)) {
+                        if !self.chunks.contains_key(&(x, z)) {
                             handles.push(s.spawn(move || ((x, z), generate_voxels(x, z))));
                             // limit to 3 chunks a frame
                             if handles.len() >= count {
@@ -48,7 +138,7 @@ impl Chunks {
                 let generated = handles.len();
                 for handle in handles.into_iter() {
                     let ((x, z), (vertices, indices)) = handle.join().unwrap();
-                    self.0
+                    self.chunks
                         .insert((x, z), Chunk::new(device, &vertices, &indices));
                 }
 
@@ -57,6 +147,70 @@ impl Chunks {
         });
         if out > 0 {
             println!("generated {out} chunks in {dur}ms");
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        depth_buffer: &wgpu::TextureView,
+        camera: &CameraData,
+        light: &LightData,
+    ) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("voxel render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_buffer,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &camera.bind_group, &[]);
+        render_pass.set_bind_group(1, &light.bind_group, &[]);
+
+        let padding = device.limits().min_uniform_buffer_offset_alignment as usize
+            - std::mem::size_of::<ChunkUniform>();
+
+        self.uniform_buffer.clear();
+        for (x, z) in self.chunks.keys() {
+            self.uniform_buffer.extend(byte_slice(&[ChunkUniform {
+                position: Vec3::new(
+                    *x as f32 * CHUNK_SIZE as f32,
+                    0.0,
+                    *z as f32 * CHUNK_SIZE as f32,
+                ),
+                _pad: 0,
+            }]));
+            self.uniform_buffer.extend((0..padding).map(|_| 0));
+        }
+        queue.write_buffer(&self.uniform, 0, byte_slice(&self.uniform_buffer));
+
+        let stride = device.limits().min_uniform_buffer_offset_alignment;
+        for (i, chunk) in self.chunks.values().enumerate() {
+            let offset = i as wgpu::DynamicOffset * stride;
+            render_pass.set_bind_group(2, &self.bind_group, &[offset]);
+
+            render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+            render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
         }
     }
 }
@@ -140,7 +294,7 @@ fn generate_voxels(chunk_x: i64, chunk_z: i64) -> (Vec<VoxelVertex>, Vec<u32>) {
                     debug_assert!(*x >= 0);
                     debug_assert!(*y >= 0);
                     debug_assert!(*z >= 0);
-                    vertex.offset(glam::UVec3::new(*x as u32, *y as u32, *z as u32));
+                    vertex.offset(*x as u32, *y as u32, *z as u32);
                     if *y > 50 {
                         vertex.set_color(1);
                     }

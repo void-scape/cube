@@ -18,7 +18,7 @@ pub struct Camera {
     pub up: bool,
     pub down: bool,
     pub disabled: bool,
-    pub ortho: bool,
+    pub proj: bool,
 }
 
 impl Camera {
@@ -31,7 +31,7 @@ impl Camera {
             }
             KeyCode::KeyO => {
                 if state.is_pressed() {
-                    self.ortho = !self.ortho;
+                    self.proj = !self.proj;
                 }
             }
             KeyCode::KeyA => {
@@ -101,7 +101,7 @@ impl Camera {
     }
 
     pub fn projection_matrix(&self, width: u32, height: u32) -> Mat4 {
-        if self.ortho {
+        if !self.proj {
             let scale = 0.1;
             let w = width as f32 / 2.0 * scale;
             let h = height as f32 / 2.0 * scale;

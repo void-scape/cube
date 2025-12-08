@@ -1,5 +1,8 @@
+mod camera;
+mod chunk;
+mod light;
+mod vert;
 pub mod voxel;
-pub mod chunk;
 
 pub fn byte_slice<T>(slice: &[T]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(slice.as_ptr().cast(), std::mem::size_of_val(slice)) }

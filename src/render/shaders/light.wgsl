@@ -1,6 +1,5 @@
 struct Camera {
-    proj: mat4x4<f32>,
-    view: mat4x4<f32>,
+    proj_view: mat4x4<f32>,
 };
 @group(0) @binding(0)
 var<uniform> camera: Camera;
@@ -36,7 +35,7 @@ fn vs_main(
 	);
 
     var out: VertexOutput;
-    out.clip_position = camera.proj * camera.view * vec4(light.position + vec3(x, y, z), 1.0);
+    out.clip_position = camera.proj_view * vec4(light.position + vec3(x, y, z), 1.0);
 	out.color = COLORS[color_index];
     return out;
 }
