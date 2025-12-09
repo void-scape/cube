@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::render::voxel;
+use std::collections::VecDeque;
 use winit::{
     event::{DeviceEvent, WindowEvent},
     keyboard::KeyCode,
@@ -18,6 +19,7 @@ pub struct Memory {
 struct World {
     camera: camera::Camera,
     voxel_pipeline: voxel::VoxelPipeline,
+    sliding_fps: VecDeque<f32>,
 }
 
 #[unsafe(no_mangle)]
@@ -68,8 +70,6 @@ pub fn update_and_render(
         ..
     }: platform::PlatformUpdate<Memory>,
 ) {
-    window.set_title(&format!("CUBE - {:.2}", 1.0 / delta));
-
     let world = memory.world.get_or_insert_with(|| World {
         camera: camera::Camera {
             translation: glam::Vec3::new(-10.0, 130.0, -10.0),
@@ -82,7 +82,17 @@ pub fn update_and_render(
             ..Default::default()
         },
         voxel_pipeline: voxel::VoxelPipeline::new(device, surface_format, width, height),
+        sliding_fps: VecDeque::with_capacity(100),
     });
+
+    if world.sliding_fps.len() >= 100 {
+        world.sliding_fps.pop_front();
+    }
+    world.sliding_fps.push_back(1.0 / delta);
+    window.set_title(&format!(
+        "CUBE - {:.2}",
+        world.sliding_fps.iter().sum::<f32>() / world.sliding_fps.len() as f32
+    ));
 
     world.camera.update(delta);
 

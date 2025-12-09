@@ -1,7 +1,7 @@
 //! Optimizations to be made:
-//! - Camera frustum culling
-//! - Splitting chunks into 6 meshes for backface culling
-//! - Greedy bit mesher
+//! - Removing chunk mesh indices because the vertices are now u32s.
+//! - Splitting chunks into 6 meshes for backface culling.
+//! - Greedy bit mesher.
 
 mod camera;
 mod chunk;

@@ -18,10 +18,10 @@ struct Chunk {
 @group(2) @binding(0)
 var<uniform> chunk: Chunk;
 
-@group(3) @binding(0)
-var shadow_map: texture_depth_2d; 
-@group(3) @binding(1)
-var shadow_map_sampler: sampler_comparison; 
+// @group(3) @binding(0)
+// var shadow_map: texture_depth_2d; 
+// @group(3) @binding(1)
+// var shadow_map_sampler: sampler_comparison; 
 
 struct VertexInput {
     /// color_index | normal_index | z | y | x
@@ -96,23 +96,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //   in.light_position.xy, in.light_position.z - bias
     // );
 
-	// TODO: This doesn't do shit about the aliasing.
-	var shadow = 0.0;
-	let texel_size = 1.0 / 1024.0;
-	for (var x = -1; x <= 1; x += 1) {
-		for (var y = -1; y <= 1; y += 1) {
-			shadow += textureSampleCompare(
-			    shadow_map, shadow_map_sampler,
-			    in.light_position.xy + vec2(f32(x), f32(y)), 
-				in.light_position.z - bias,
-			); 
-		}    
-	}
-	shadow /= 9.0;
+	// // TODO: This doesn't do shit about the aliasing.
+	// var shadow = 0.0;
+	// let texel_size = 1.0 / 1024.0;
+	// for (var x = -1; x <= 1; x += 1) {
+	// 	for (var y = -1; y <= 1; y += 1) {
+	// 		shadow += textureSampleCompare(
+	// 		    shadow_map, shadow_map_sampler,
+	// 		    in.light_position.xy + vec2(f32(x), f32(y)), 
+	// 			in.light_position.z - bias,
+	// 		); 
+	// 	}    
+	// }
+	// shadow /= 9.0;
 
 	let buckets = 9.0;
-	let light = ambient + shadow * diffuse;
- 	let quantized_light = floor(light * buckets) / buckets;
+	let light = ambient + diffuse;
+	// let light = ambient + shadow * diffuse;
+ 	// let quantized_light = floor(light * buckets) / buckets;
 
-    return vec4(quantized_light * color, 1.0);
+    return vec4(light * color, 1.0);
 }

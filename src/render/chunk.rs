@@ -9,7 +9,7 @@ use crate::{
         vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
     },
 };
-use glam::{FloatExt, Vec2, Vec3};
+use glam::{FloatExt, UVec3, Vec2, Vec3, Vec4};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU64,
@@ -17,7 +17,7 @@ use std::{
 use wgpu::util::DeviceExt;
 
 pub const CHUNK_SIZE: usize = 32;
-pub const VIEW_DISTANCE: usize = 4;
+pub const VIEW_DISTANCE: usize = 22;
 
 #[repr(C)]
 pub struct ChunkUniform {
@@ -27,7 +27,8 @@ pub struct ChunkUniform {
 
 pub struct ChunkData {
     pub pipeline: wgpu::RenderPipeline,
-    pub chunks: HashMap<(i64, i64), Chunk>,
+    pub chunks: HashMap<(i64, i64), ChunkBuffer>,
+    pub visible: HashMap<(i64, i64), &'static ChunkBuffer>,
     pub uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -40,7 +41,7 @@ impl ChunkData {
         surface_format: wgpu::TextureFormat,
         camera: &CameraData,
         light: &LightData,
-        shadow_map_bind_group_layout: &wgpu::BindGroupLayout,
+        _shadow_map_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // TODO: The size of this buffer will depend on the devices `min_uniform_buffer_offset_alignment`.
         // Also, changing the number of chunks rendered would require resizing this buffer.
@@ -89,7 +90,7 @@ impl ChunkData {
                     &camera.bind_group_layout,
                     &light.bind_group_layout,
                     &bind_group_layout,
-                    shadow_map_bind_group_layout,
+                    // shadow_map_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -105,7 +106,8 @@ impl ChunkData {
 
         Self {
             pipeline,
-            chunks: Default::default(),
+            chunks: HashMap::with_capacity(VIEW_DISTANCE * VIEW_DISTANCE),
+            visible: HashMap::with_capacity(VIEW_DISTANCE * VIEW_DISTANCE),
             uniform,
             bind_group,
             bind_group_layout,
@@ -121,6 +123,8 @@ impl ChunkData {
         let zrange = z - VIEW_DISTANCE as i64..=z + VIEW_DISTANCE as i64;
         let xrange = x - VIEW_DISTANCE as i64..=x + VIEW_DISTANCE as i64;
 
+        // SAFETY: Make sure that visible doesn't point to any chunks.
+        self.visible.clear();
         self.chunks
             .retain(|(x, z), _| xrange.contains(x) && zrange.contains(z));
 
@@ -131,7 +135,10 @@ impl ChunkData {
                 'outer: for z in zrange.clone() {
                     for x in xrange.clone() {
                         if !self.chunks.contains_key(&(x, z)) {
-                            handles.push(s.spawn(move || ((x, z), generate_voxels(x, z))));
+                            handles.push(
+                                s.spawn(move || ((x, z), mesh_chunk(&generate_voxels(x, z)))),
+                            );
+
                             // limit to 3 chunks a frame
                             if handles.len() >= count {
                                 break 'outer;
@@ -144,7 +151,7 @@ impl ChunkData {
                 for handle in handles.into_iter() {
                     let ((x, z), (vertices, indices)) = handle.join().unwrap();
                     self.chunks
-                        .insert((x, z), Chunk::new(device, &vertices, &indices));
+                        .insert((x, z), ChunkBuffer::new(device, &vertices, &indices));
                 }
 
                 generated
@@ -164,105 +171,147 @@ impl ChunkData {
         depth_buffer: &wgpu::TextureView,
         camera: &CameraData,
         light: &LightData,
-        shadow: &ShadowData,
+        _shadow: &ShadowData,
     ) {
-        // upload chunk data to gpu
-        let padding = device.limits().min_uniform_buffer_offset_alignment as usize
-            - std::mem::size_of::<ChunkUniform>();
+        let (dur, _) = crate::platform::debug_time_micros(|| {
+            // SAFETY: `self.visible` is cleared before writing to `self.chunks`,
+            // therefore there will be no aliased mutable references.
+            let visible = unsafe {
+                std::mem::transmute::<
+                    &mut HashMap<(i64, i64), &'static ChunkBuffer>,
+                    &mut HashMap<(i64, i64), &ChunkBuffer>,
+                >(&mut self.visible)
+            };
 
-        self.uniform_buffer.clear();
-        for (x, z) in self.chunks.keys() {
-            self.uniform_buffer.extend(byte_slice(&[ChunkUniform {
-                position: Vec3::new(
-                    *x as f32 * CHUNK_SIZE as f32,
-                    0.0,
-                    *z as f32 * CHUNK_SIZE as f32,
-                ),
-                _pad: 0,
-            }]));
-            self.uniform_buffer.extend((0..padding).map(|_| 0));
-        }
-        queue.write_buffer(&self.uniform, 0, byte_slice(&self.uniform_buffer));
+            // upload chunk data to gpu
+            let padding = device.limits().min_uniform_buffer_offset_alignment as usize
+                - std::mem::size_of::<ChunkUniform>();
 
-        // render to shadow map first
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow render pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &shadow.shadow_map,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-
-            render_pass.set_pipeline(&shadow.pipeline);
-            render_pass.set_bind_group(0, &shadow.bind_group, &[]);
-
-            let stride = device.limits().min_uniform_buffer_offset_alignment;
-            for (i, chunk) in self.chunks.values().enumerate() {
-                let offset = i as wgpu::DynamicOffset * stride;
-                render_pass.set_bind_group(1, &self.bind_group, &[offset]);
-
-                render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-                render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            // NOTE: Could definitely speed this up, but this function is only ~80us.
+            for ((x, z), chunk) in self.chunks.iter() {
+                let cs = CHUNK_SIZE as f32;
+                let world_space = Vec4::new(*x as f32 * cs, 0.0, *z as f32 * cs, 1.0);
+                if [
+                    Vec4::ZERO,
+                    Vec4::new(cs, 0.0, 0.0, 0.0),
+                    Vec4::new(cs, cs, 0.0, 0.0),
+                    Vec4::new(0.0, cs, 0.0, 0.0),
+                    //
+                    Vec4::new(0.0, 0.0, cs, 0.0),
+                    Vec4::new(cs, 0.0, cs, 0.0),
+                    Vec4::new(cs, cs, cs, 0.0),
+                    Vec4::new(0.0, cs, cs, 0.0),
+                ]
+                .into_iter()
+                .any(|corner| {
+                    let result = camera.camera.proj_view.mul_vec4(world_space + corner);
+                    let viewspace = -1.0..=1.0;
+                    viewspace.contains(&result.x)
+                        && viewspace.contains(&result.y)
+                        && viewspace.contains(&result.z)
+                }) {
+                    visible.insert((*x, *z), chunk);
+                }
             }
-        }
+            println!("{}/{} chunks visible", visible.len(), self.chunks.len());
 
-        // then do normal render pass
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("voxel render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_buffer,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &camera.bind_group, &[]);
-            render_pass.set_bind_group(1, &light.bind_group, &[]);
-            render_pass.set_bind_group(3, &shadow.shadow_map_bind_group, &[]);
-
-            let stride = device.limits().min_uniform_buffer_offset_alignment;
-            for (i, chunk) in self.chunks.values().enumerate() {
-                let offset = i as wgpu::DynamicOffset * stride;
-                render_pass.set_bind_group(2, &self.bind_group, &[offset]);
-
-                render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-                render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            self.uniform_buffer.clear();
+            for (x, z) in visible.keys() {
+                self.uniform_buffer.extend(byte_slice(&[ChunkUniform {
+                    position: Vec3::new(
+                        *x as f32 * CHUNK_SIZE as f32,
+                        0.0,
+                        *z as f32 * CHUNK_SIZE as f32,
+                    ),
+                    _pad: 0,
+                }]));
+                self.uniform_buffer.extend((0..padding).map(|_| 0));
             }
-        }
+            queue.write_buffer(&self.uniform, 0, byte_slice(&self.uniform_buffer));
+
+            // // render to shadow map first
+            // {
+            //     let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            //         label: Some("shadow render pass"),
+            //         color_attachments: &[],
+            //         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            //             view: &shadow.shadow_map,
+            //             depth_ops: Some(wgpu::Operations {
+            //                 load: wgpu::LoadOp::Clear(1.0),
+            //                 store: wgpu::StoreOp::Store,
+            //             }),
+            //             stencil_ops: None,
+            //         }),
+            //         ..Default::default()
+            //     });
+            //
+            //     render_pass.set_pipeline(&shadow.pipeline);
+            //     render_pass.set_bind_group(0, &shadow.bind_group, &[]);
+            //
+            //     let stride = device.limits().min_uniform_buffer_offset_alignment;
+            //     for (i, chunk) in self.chunks.values().enumerate() {
+            //         let offset = i as wgpu::DynamicOffset * stride;
+            //         render_pass.set_bind_group(1, &self.bind_group, &[offset]);
+            //
+            //         render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+            //         render_pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+            //         render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+            //     }
+            // }
+
+            // then do normal render pass
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("voxel render pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_buffer,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(1, &light.bind_group, &[]);
+                // render_pass.set_bind_group(3, &shadow.shadow_map_bind_group, &[]);
+
+                let stride = device.limits().min_uniform_buffer_offset_alignment;
+                for (i, chunk) in visible.values().enumerate() {
+                    // for (i, chunk) in self.chunks.values().enumerate() {
+                    let offset = i as wgpu::DynamicOffset * stride;
+                    render_pass.set_bind_group(2, &self.bind_group, &[offset]);
+
+                    render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                    render_pass
+                        .set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+                }
+            }
+        });
+        println!("CPU render time: {dur}us");
     }
 }
 
-pub struct Chunk {
-    pub vertices: wgpu::Buffer,
-    pub indices: wgpu::Buffer,
-    pub indices_count: u32,
+struct ChunkBuffer {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    indices_count: u32,
 }
 
-impl Chunk {
+impl ChunkBuffer {
     fn new(device: &wgpu::Device, vertices: &[VoxelVertex], indices: &[u32]) -> Self {
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk vertex buffer"),
@@ -285,11 +334,48 @@ impl Chunk {
     }
 }
 
-fn generate_voxels(chunk_x: i64, chunk_z: i64) -> (Vec<VoxelVertex>, Vec<u32>) {
+struct Chunk([Voxel; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]);
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self([Voxel::default(); CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE])
+    }
+}
+
+impl Chunk {
+    #[track_caller]
+    fn get(&self, xyz: UVec3) -> &Voxel {
+        &self.0[Self::index(xyz)]
+    }
+
+    #[track_caller]
+    fn get_mut(&mut self, xyz: UVec3) -> &mut Voxel {
+        &mut self.0[Self::index(xyz)]
+    }
+
+    #[track_caller]
+    fn index(xyz: UVec3) -> usize {
+        debug_assert!(xyz.x < 32);
+        debug_assert!(xyz.y < 32);
+        debug_assert!(xyz.z < 32);
+        const CS: u32 = CHUNK_SIZE as u32;
+        (xyz.z * (CS * CS) + xyz.y * CS + xyz.x) as usize
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+enum Voxel {
+    #[default]
+    Air,
+    Dirt,
+    Stone,
+}
+
+fn generate_voxels(chunk_x: i64, chunk_z: i64) -> Chunk {
     let perlin_scale = 200;
     let noise_layers = [(1.5, 80.0), (3.0, 40.0), (8.0, 30.0)];
 
-    let mut translations = Vec::new();
+    let mut chunk = Chunk::default();
 
     let chunk_x = chunk_x as f32 * CHUNK_SIZE as f32;
     let chunk_z = chunk_z as f32 * CHUNK_SIZE as f32;
@@ -307,48 +393,55 @@ fn generate_voxels(chunk_x: i64, chunk_z: i64) -> (Vec<VoxelVertex>, Vec<u32>) {
             }
 
             for y in 0..surface.round() as usize {
-                translations.push((x as i32, y as i32, z as i32));
+                let voxel = if y > 50 { Voxel::Stone } else { Voxel::Dirt };
+                todo!("make y only 32");
+                *chunk.get_mut(UVec3::new(x as u32, y as u32, z as u32)) = voxel;
             }
         }
     }
 
-    let hash: HashSet<(i32, i32, i32)> = translations.iter().copied().collect();
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+    chunk
+}
 
-    let neighbors = [
-        (1, 0, 0, 3),
-        (-1, 0, 0, 2),
-        (0, 1, 0, 5),
-        (0, -1, 0, 4),
-        (0, 0, 1, 1),
-        (0, 0, -1, 0),
-    ];
-
-    for (x, y, z) in translations.iter() {
-        for (dx, dy, dz, face_idx) in neighbors.iter() {
-            let neighbor_pos = (x + dx, y + dy, z + dz);
-
-            if !hash.contains(&neighbor_pos) {
-                let vertex_offset = vertices.len() as u32;
-                for mut vertex in VOXEL_FACES[*face_idx].iter().cloned() {
-                    debug_assert!(*x >= 0);
-                    debug_assert!(*y >= 0);
-                    debug_assert!(*z >= 0);
-                    vertex.offset(*x as u32, *y as u32, *z as u32);
-                    if *y > 50 {
-                        vertex.set_color(1);
-                    }
-                    vertices.push(vertex);
-                }
-                for index in VOXEL_FACES_INDICES[*face_idx].iter() {
-                    indices.push(vertex_offset + index);
-                }
-            }
-        }
-    }
-
-    (vertices, indices)
+fn mesh_chunk(chunk: &Chunk) -> (Vec<VoxelVertex>, Vec<u32>) {
+    todo!()
+    // let hash: HashSet<(u32, u32, u32)> = translations.iter().copied().collect();
+    // let mut vertices = Vec::new();
+    // let mut indices = Vec::new();
+    //
+    // let neighbors = [
+    //     (1, 0, 0, 3),
+    //     (-1, 0, 0, 2),
+    //     (0, 1, 0, 5),
+    //     (0, -1, 0, 4),
+    //     (0, 0, 1, 1),
+    //     (0, 0, -1, 0),
+    // ];
+    //
+    // for (x, y, z) in translations.iter() {
+    //     for (dx, dy, dz, face_idx) in neighbors.iter() {
+    //         let neighbor_pos = (x + dx, y + dy, z + dz);
+    //
+    //         if !hash.contains(&neighbor_pos) {
+    //             let vertex_offset = vertices.len() as u32;
+    //             for mut vertex in VOXEL_FACES[*face_idx].iter().cloned() {
+    //                 debug_assert!(*x >= 0);
+    //                 debug_assert!(*y >= 0);
+    //                 debug_assert!(*z >= 0);
+    //                 vertex.offset(*x as u32, *y as u32, *z as u32);
+    //                 if *y > 50 {
+    //                     vertex.set_color(1);
+    //                 }
+    //                 vertices.push(vertex);
+    //             }
+    //             for index in VOXEL_FACES_INDICES[*face_idx].iter() {
+    //                 indices.push(vertex_offset + index);
+    //             }
+    //         }
+    //     }
+    // }
+    //
+    // (vertices, indices)
 }
 
 // https://thebookofshaders.com/edit.php#11/2d-gnoise.frag

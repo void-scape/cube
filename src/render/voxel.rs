@@ -76,7 +76,7 @@ impl VoxelPipeline {
         self.chunks.update(device, camera);
 
         self.light.prepare_render_pass(queue, camera);
-        self.shadow.prepare_render_pass(queue, &self.light);
+        // self.shadow.prepare_render_pass(queue, &self.light);
         self.chunks.render(
             device,
             queue,
@@ -89,6 +89,6 @@ impl VoxelPipeline {
         );
         self.light
             .debug_render(encoder, view, &self.depth_buffer, &self.camera);
-        self.shadow.debug_render(encoder, view);
+        // self.shadow.debug_render(encoder, view);
     }
 }

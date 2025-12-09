@@ -4,10 +4,11 @@ use glam::Mat4;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CameraUniform {
-    proj_view: Mat4,
+    pub proj_view: Mat4,
 }
 
 pub struct CameraData {
+    pub camera: CameraUniform,
     pub uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -15,6 +16,10 @@ pub struct CameraData {
 
 impl CameraData {
     pub fn new(device: &wgpu::Device) -> Self {
+        let camera = CameraUniform {
+            proj_view: Mat4::IDENTITY,
+        };
+
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel camera uniform"),
             size: std::mem::size_of::<CameraUniform>() as wgpu::BufferAddress,
@@ -45,6 +50,7 @@ impl CameraData {
         });
 
         Self {
+            camera,
             uniform,
             bind_group,
             bind_group_layout,
@@ -52,9 +58,9 @@ impl CameraData {
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue, width: u32, height: u32, camera: &Camera) {
-        let proj_view = camera
+        self.camera.proj_view = camera
             .projection_matrix(width, height)
             .mul_mat4(&camera.view_matrix());
-        queue.write_buffer(&self.uniform, 0, byte_slice(&[CameraUniform { proj_view }]));
+        queue.write_buffer(&self.uniform, 0, byte_slice(&[self.camera]));
     }
 }

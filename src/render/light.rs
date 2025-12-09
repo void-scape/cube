@@ -6,7 +6,7 @@ use crate::{
         vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
     },
 };
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
 // NOTE: Uniforms require 16 byte spacing
@@ -119,9 +119,9 @@ impl LightData {
     }
 
     pub fn prepare_render_pass(&mut self, queue: &wgpu::Queue, camera: &Camera) {
-        // let old_position = self.light.position;
-        // self.light.position =
-        //     Quat::from_axis_angle((0.0, 1.0, 0.0).into(), 0.01f32.to_radians()) * old_position;
+        let old_position = self.light.position;
+        self.light.position =
+            Quat::from_axis_angle((0.0, 1.0, 0.0).into(), 0.01f32.to_radians()) * old_position;
         self.light.proj_view = self.view_proj(camera);
         queue.write_buffer(&self.uniform, 0, byte_slice(&[self.light]));
     }
