@@ -372,6 +372,33 @@ enum Voxel {
 }
 
 fn generate_voxels(chunk_x: i64, chunk_z: i64) -> Chunk {
+    // https://thebookofshaders.com/edit.php#11/2d-gnoise.frag
+    fn perlin(st: Vec2) -> f32 {
+        fn random2(st: Vec2) -> Vec2 {
+            fn random(v: f32) -> f32 {
+                -1.0 + 2.0 * (v.sin() * 43758.547).fract()
+            }
+
+            let st = Vec2::new(
+                st.dot(Vec2::new(127.1, 311.7)),
+                st.dot(Vec2::new(269.5, 183.3)),
+            );
+            Vec2::new(random(st.x), random(st.y))
+        }
+
+        let i = st.floor();
+        let f = st - i;
+        let u = f * f * (3.0 - 2.0 * f);
+
+        let left = random2(i)
+            .dot(f)
+            .lerp(random2(i + Vec2::X).dot(f - Vec2::X), u.x);
+        let right = random2(i + Vec2::Y)
+            .dot(f - Vec2::Y)
+            .lerp(random2(i + Vec2::ONE).dot(f - Vec2::ONE), u.x);
+        left.lerp(right, u.y)
+    }
+
     let perlin_scale = 200;
     let noise_layers = [(1.5, 80.0), (3.0, 40.0), (8.0, 30.0)];
 
@@ -444,29 +471,45 @@ fn mesh_chunk(chunk: &Chunk) -> (Vec<VoxelVertex>, Vec<u32>) {
     // (vertices, indices)
 }
 
-// https://thebookofshaders.com/edit.php#11/2d-gnoise.frag
-fn perlin(st: Vec2) -> f32 {
-    fn random2(st: Vec2) -> Vec2 {
-        fn random(v: f32) -> f32 {
-            -1.0 + 2.0 * (v.sin() * 43758.547).fract()
+struct Quad {
+    min: [u32; 2],
+    max: [u32; 2],
+}
+
+fn greedy_mesh(quads: &mut Vec<Quad>, faces: &mut [u32; 32]) {
+    let len = 32;
+    for x in 0..len {
+        if faces[x].trailing_zeros() == 32 {
+            continue;
         }
 
-        let st = Vec2::new(
-            st.dot(Vec2::new(127.1, 311.7)),
-            st.dot(Vec2::new(269.5, 183.3)),
-        );
-        Vec2::new(random(st.x), random(st.y))
+        for y in 0..len {
+            let start = faces[x];
+            let offset = (start >> y).trailing_zeros();
+            if offset == 32 {
+                continue;
+            }
+            let height = (start >> y >> offset).trailing_ones();
+            let base_mask = (1 << height) - 1;
+            let quad_mask = !(base_mask << (offset + y as u32));
+            let mut span = 0;
+            for xoffset in 1..=len - x {
+                if x + xoffset == len {
+                    span = x + xoffset;
+                    break;
+                }
+                let next = faces[x + xoffset];
+                if ((next >> y >> offset) & base_mask) != base_mask {
+                    span = x + xoffset;
+                    break;
+                }
+                faces[x + xoffset] &= quad_mask;
+            }
+            faces[x] &= quad_mask;
+            quads.push(Quad {
+                min: [x as u32, offset + y as u32],
+                max: [span as u32, offset + y as u32 + height],
+            });
+        }
     }
-
-    let i = st.floor();
-    let f = st - i;
-    let u = f * f * (3.0 - 2.0 * f);
-
-    let left = random2(i)
-        .dot(f)
-        .lerp(random2(i + Vec2::X).dot(f - Vec2::X), u.x);
-    let right = random2(i + Vec2::Y)
-        .dot(f - Vec2::Y)
-        .lerp(random2(i + Vec2::ONE).dot(f - Vec2::ONE), u.x);
-    left.lerp(right, u.y)
 }
