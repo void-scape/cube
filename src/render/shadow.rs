@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use crate::render::{byte_slice, chunk::ChunkData, light::LightData, vert::VoxelVertex};
 use glam::Mat4;
 use wgpu::util::DeviceExt;

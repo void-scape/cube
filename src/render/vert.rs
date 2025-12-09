@@ -10,6 +10,10 @@ use glam::IVec3;
 //
 // Seems to almost double performance? The fps measurement is
 // not very scientific, but it seems like it went from ~450 to ~750.
+//
+// TODO: Color needs to be changed to a more generic voxel id that stores all
+// related voxel information in the wgsl shader. Maybe this information should
+// be stored in a uniform so that the logic could be centralized?
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VoxelVertex {
