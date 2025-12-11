@@ -6,6 +6,7 @@
 mod camera;
 mod chunk;
 mod light;
+mod lines;
 mod shadow;
 mod vert;
 pub mod voxel;

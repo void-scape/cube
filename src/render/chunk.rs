@@ -2,11 +2,8 @@ use crate::{
     camera::Camera,
     platform::debug,
     render::{
-        byte_slice,
-        camera::CameraData,
-        light::LightData,
-        shadow::ShadowData,
-        vert::{VOXEL_FACES, VOXEL_FACES_INDICES, VoxelVertex},
+        byte_slice, camera::CameraData, light::LightData, lines::ChunkLineRenderer,
+        shadow::ShadowData, vert::VoxelVertex,
     },
 };
 use glam::{FloatExt, IVec3, UVec3, Vec2, Vec3, Vec4};
@@ -15,6 +12,7 @@ use wgpu::util::DeviceExt;
 
 pub const CHUNK_SIZE: usize = 32;
 pub const VIEW_DISTANCE: usize = 22;
+// pub const VIEW_DISTANCE: usize = 4;
 
 #[repr(C)]
 pub struct ChunkUniform {
@@ -30,6 +28,9 @@ pub struct ChunkData {
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub uniform_buffer: Vec<u8>,
+    // debug
+    #[allow(unused)]
+    lines: ChunkLineRenderer,
 }
 
 impl ChunkData {
@@ -101,6 +102,8 @@ impl ChunkData {
             shader,
         );
 
+        let lines = ChunkLineRenderer::new(device, surface_format, camera);
+
         Self {
             pipeline,
             chunks: HashMap::with_capacity(VIEW_DISTANCE * VIEW_DISTANCE),
@@ -109,6 +112,8 @@ impl ChunkData {
             bind_group,
             bind_group_layout,
             uniform_buffer,
+            //
+            lines,
         }
     }
 
@@ -130,37 +135,19 @@ impl ChunkData {
         });
 
         let (dur, out) = debug::debug_time_millis(|| {
-            std::thread::scope(|s| {
-                let count = 2;
-                let mut handles = Vec::with_capacity(count);
-                'outer: for z in zrange.clone() {
-                    for y in yrange.clone() {
-                        for x in xrange.clone() {
-                            if !self.chunks.contains_key(&IVec3::new(x, y, z)) {
-                                handles.push(s.spawn(move || {
-                                    ((x, y, z), mesh_chunk(&generate_voxels(IVec3::new(x, y, z))))
-                                }));
-
-                                // limit to 3 chunks a frame
-                                if handles.len() >= count {
-                                    break 'outer;
-                                }
-                            }
-                        }
+            let mut generated = 0;
+            for z in zrange.clone() {
+                for y in yrange.clone() {
+                    for x in xrange.clone() {
+                        self.chunks.entry(IVec3::new(x, y, z)).or_insert_with(|| {
+                            generated += 1;
+                            let vertices = mesh_chunk(&generate_voxels(IVec3::new(x, y, z)));
+                            ChunkBuffer::new(device, &vertices)
+                        });
                     }
                 }
-
-                let generated = handles.len();
-                for handle in handles.into_iter() {
-                    let ((x, y, z), (vertices, indices)) = handle.join().unwrap();
-                    self.chunks.insert(
-                        IVec3::new(x, y, z),
-                        ChunkBuffer::new(device, &vertices, &indices),
-                    );
-                }
-
-                generated
-            })
+            }
+            generated
         });
         if out > 0 {
             println!("generated {out} chunks in {dur}ms");
@@ -178,7 +165,7 @@ impl ChunkData {
         light: &LightData,
         _shadow: &ShadowData,
     ) {
-        let (dur, _) = crate::platform::debug_time_micros(|| {
+        let (_dur, _) = crate::platform::debug_time_micros(|| {
             // SAFETY: `self.visible` is cleared before writing to `self.chunks`,
             // therefore there will be no aliased mutable references.
             let visible = unsafe {
@@ -225,7 +212,7 @@ impl ChunkData {
                     visible.insert(*chunk_translation, chunk);
                 }
             }
-            println!("{}/{} chunks visible", visible.len(), self.chunks.len());
+            // println!("{}/{} chunks visible", visible.len(), self.chunks.len());
 
             self.uniform_buffer.clear();
             for chunk_translation in visible.keys() {
@@ -302,44 +289,44 @@ impl ChunkData {
                     let offset = i as wgpu::DynamicOffset * stride;
                     render_pass.set_bind_group(2, &self.bind_group, &[offset]);
 
-                    if chunk.indices_count > 0 {
+                    if chunk.vertex_count > 0 {
                         render_pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-                        render_pass
-                            .set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        render_pass.draw_indexed(0..chunk.indices_count, 0, 0..1);
+                        render_pass.draw(0..chunk.vertex_count, 0..1);
                     }
                 }
             }
+
+            // // debug
+            // self.lines.render(
+            //     queue,
+            //     encoder,
+            //     view,
+            //     depth_buffer,
+            //     camera,
+            //     VIEW_DISTANCE as i32,
+            // );
         });
-        println!("CPU render time: {dur}us");
+        // println!("CPU render time: {dur}us");
     }
 }
 
 pub struct ChunkBuffer {
     vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    indices_count: u32,
+    vertex_count: u32,
 }
 
 impl ChunkBuffer {
-    fn new(device: &wgpu::Device, vertices: &[VoxelVertex], indices: &[u32]) -> Self {
+    fn new(device: &wgpu::Device, vertices: &[VoxelVertex]) -> Self {
+        let vertex_count = vertices.len() as u32;
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk vertex buffer"),
             contents: byte_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let indices_count = indices.len() as u32;
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk index buffer"),
-            contents: byte_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         Self {
             vertices,
-            indices,
-            indices_count,
+            vertex_count,
         }
     }
 }
@@ -373,7 +360,7 @@ impl Chunk {
     }
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 enum Voxel {
     #[default]
     Air,
@@ -446,58 +433,184 @@ fn generate_voxels(mut chunk_translation: IVec3) -> Chunk {
     chunk
 }
 
-fn mesh_chunk(chunk: &Chunk) -> (Vec<VoxelVertex>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+fn mesh_chunk(chunk: &Chunk) -> Vec<VoxelVertex> {
+    // solid voxels for x, y, z axes
+    let mut axis_cols = [[[0u32; CHUNK_SIZE]; CHUNK_SIZE]; 3];
+    let mut col_face_masks = [[[0u32; CHUNK_SIZE]; CHUNK_SIZE]; 6];
 
-    let neighbors = [
-        (1, 0, 0, 3),
-        (-1, 0, 0, 2),
-        (0, 1, 0, 5),
-        (0, -1, 0, 4),
-        (0, 0, 1, 1),
-        (0, 0, -1, 0),
-    ];
-
-    for z in 0..CHUNK_SIZE as i32 {
-        for y in 0..CHUNK_SIZE as i32 {
-            for x in 0..CHUNK_SIZE as i32 {
-                for (dx, dy, dz, face_idx) in neighbors.iter() {
-                    let nx = x + *dx;
-                    let ny = y + *dy;
-                    let nz = z + *dz;
-
-                    let x = x as u32;
-                    let y = y as u32;
-                    let z = z as u32;
-
-                    let voxel = chunk.get(UVec3::new(x, y, z));
-                    if *voxel == Voxel::Air {
-                        continue;
-                    }
-
-                    if [nx, ny, nz]
-                        .into_iter()
-                        .any(|p| p < 0 || p >= CHUNK_SIZE as i32)
-                        || chunk.get(UVec3::new(nx as u32, ny as u32, nz as u32)) != voxel
-                    {
-                        let vertex_offset = vertices.len() as u32;
-                        for mut vertex in VOXEL_FACES[*face_idx].iter().cloned() {
-                            vertex.offset(x, y, z);
-                            vertices.push(vertex);
-                        }
-                        for index in VOXEL_FACES_INDICES[*face_idx].iter() {
-                            indices.push(vertex_offset + index);
-                        }
-                    }
+    // populate columns with solid voxel data
+    let mut voxels = chunk.0.iter();
+    for z in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                // TODO: unchecked
+                let voxel = voxels.next().unwrap();
+                debug_assert_eq!(voxel, chunk.get(UVec3::new(x as u32, y as u32, z as u32)));
+                if *voxel != Voxel::Air {
+                    axis_cols[0][y][z] |= 1 << x as u32;
+                    axis_cols[1][z][x] |= 1 << y as u32;
+                    axis_cols[2][x][y] |= 1 << z as u32;
                 }
             }
         }
     }
 
-    (vertices, indices)
+    // cull faces by checking the next slice on the axis
+    for axis in 0..3 {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let lower = axis_cols[axis][y][x];
+                let upper = if y + 1 < CHUNK_SIZE {
+                    axis_cols[axis][y + 1][x]
+                } else {
+                    0
+                };
+                let below = if y > 0 { axis_cols[axis][y - 1][x] } else { 0 };
+                col_face_masks[2 * axis][y][x] = lower & !upper;
+                col_face_masks[2 * axis + 1][y][x] = lower & !below;
+            }
+        }
+    }
+
+    let mut vertices = Vec::with_capacity(32 * 32 * 4);
+    let mut quads = Vec::with_capacity(1024);
+
+    for (y, zx_faces) in col_face_masks[0].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, zx_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let xmin = min[1];
+            let xmax = max[1];
+
+            let zmin = min[0];
+            let zmax = max[0];
+
+            let y = y as u32;
+            let normal = IVec3::Y;
+            let v1 = VoxelVertex::new(xmax, y + 1, zmax, normal);
+            let v2 = VoxelVertex::new(xmin, y + 1, zmax, normal);
+            let v3 = VoxelVertex::new(xmin, y + 1, zmin, normal);
+            let v4 = VoxelVertex::new(xmax, y + 1, zmin, normal);
+            vertices.extend([v1, v4, v3, v3, v2, v1]);
+        }
+    }
+
+    for (y, zx_faces) in col_face_masks[1].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, zx_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let xmin = min[1];
+            let xmax = max[1];
+
+            let zmin = min[0];
+            let zmax = max[0];
+
+            let y = y as u32;
+            let normal = IVec3::NEG_Y;
+            let v1 = VoxelVertex::new(xmax, y, zmax, normal);
+            let v2 = VoxelVertex::new(xmin, y, zmax, normal);
+            let v3 = VoxelVertex::new(xmin, y, zmin, normal);
+            let v4 = VoxelVertex::new(xmax, y, zmin, normal);
+            vertices.extend([v1, v2, v3, v3, v4, v1]);
+        }
+    }
+
+    for (z, xy_faces) in col_face_masks[2].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, xy_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let ymin = min[1];
+            let ymax = max[1];
+
+            let xmin = min[0];
+            let xmax = max[0];
+
+            let z = z as u32;
+            let normal = IVec3::Z;
+            let v1 = VoxelVertex::new(xmax, ymax, z + 1, normal);
+            let v2 = VoxelVertex::new(xmin, ymax, z + 1, normal);
+            let v3 = VoxelVertex::new(xmin, ymin, z + 1, normal);
+            let v4 = VoxelVertex::new(xmax, ymin, z + 1, normal);
+            vertices.extend([v1, v2, v3, v3, v4, v1]);
+        }
+    }
+
+    for (z, xy_faces) in col_face_masks[3].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, xy_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let ymin = min[1];
+            let ymax = max[1];
+
+            let xmin = min[0];
+            let xmax = max[0];
+
+            let z = z as u32;
+            let normal = IVec3::NEG_Z;
+            let v1 = VoxelVertex::new(xmax, ymax, z, normal);
+            let v2 = VoxelVertex::new(xmin, ymax, z, normal);
+            let v3 = VoxelVertex::new(xmin, ymin, z, normal);
+            let v4 = VoxelVertex::new(xmax, ymin, z, normal);
+            vertices.extend([v1, v4, v3, v3, v2, v1]);
+        }
+    }
+
+    for (x, yz_faces) in col_face_masks[4].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, yz_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let zmin = min[1];
+            let zmax = max[1];
+
+            let ymin = min[0];
+            let ymax = max[0];
+
+            let x = x as u32;
+            let normal = IVec3::X;
+            let v1 = VoxelVertex::new(x + 1, ymax, zmax, normal);
+            let v2 = VoxelVertex::new(x + 1, ymin, zmax, normal);
+            let v3 = VoxelVertex::new(x + 1, ymin, zmin, normal);
+            let v4 = VoxelVertex::new(x + 1, ymax, zmin, normal);
+            vertices.extend([v1, v2, v3, v3, v4, v1]);
+        }
+    }
+
+    for (x, yz_faces) in col_face_masks[5].iter_mut().enumerate() {
+        greedy_mesh(&mut quads, yz_faces);
+        for quad in quads.drain(..) {
+            let min = quad.min;
+            let max = quad.max;
+
+            let zmin = min[1];
+            let zmax = max[1];
+
+            let ymin = min[0];
+            let ymax = max[0];
+
+            let x = x as u32;
+            let normal = IVec3::NEG_X;
+            let v1 = VoxelVertex::new(x, ymax, zmax, normal);
+            let v2 = VoxelVertex::new(x, ymin, zmax, normal);
+            let v3 = VoxelVertex::new(x, ymin, zmin, normal);
+            let v4 = VoxelVertex::new(x, ymax, zmin, normal);
+            vertices.extend([v1, v4, v3, v3, v2, v1]);
+        }
+    }
+
+    vertices
 }
 
+#[derive(Debug)]
 struct Quad {
     min: [u32; 2],
     max: [u32; 2],
@@ -506,10 +619,13 @@ struct Quad {
 // NOTE: Pre `greedy_mesh`, the game runs at ~400 fps with 8,100 total chunks. This
 // measurement was taken without changing the angle of the camera. I expect this number
 // to atleast double with the greedy mesher.
+//
+// UPDATE: It did not double, it is 1.65x, which is reasonable. It is still not perfectly
+// efficient because it does not check neighboring chunks.
 fn greedy_mesh(quads: &mut Vec<Quad>, faces: &mut [u32; 32]) {
     let len = 32;
     for x in 0..len {
-        if faces[x].trailing_zeros() == 32 {
+        if faces[x] == 0 {
             continue;
         }
 
@@ -520,7 +636,7 @@ fn greedy_mesh(quads: &mut Vec<Quad>, faces: &mut [u32; 32]) {
                 continue;
             }
             let height = (start >> y >> offset).trailing_ones();
-            let base_mask = (1 << height) - 1;
+            let base_mask = 1u32.checked_shl(height).map(|v| v - 1).unwrap_or(!0);
             let quad_mask = !(base_mask << (offset + y as u32));
             let mut span = 0;
             for xoffset in 1..=len - x {

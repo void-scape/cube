@@ -24,9 +24,9 @@ var<uniform> chunk: Chunk;
 // var shadow_map_sampler: sampler_comparison; 
 
 struct VertexInput {
-    /// color_index | normal_index | z | y | x
-    /// ---------------------------------------
-    /// 1             3              5   8   5
+    /// voxel_id | normal_index | z | y | x
+    /// ---------+--------------+---+---+---
+    /// 11       | 3            | 6 | 6 | 6
     @location(0) packed: u32,
 };
 
@@ -43,10 +43,10 @@ fn vs_main(
     in: VertexInput,
 ) -> VertexOutput {
 	let x = f32(in.packed & 0x3f);
-	let y = f32((in.packed >> 6) & 0xff);
-	let z = f32((in.packed >> 14) & 0x3f);
-	let normal_index = (in.packed >> 20) & 7;
-	let color_index = (in.packed >> 23) & 1;
+	let y = f32((in.packed >> 6) & 0x3f);
+	let z = f32((in.packed >> 12) & 0x3f);
+	let normal_index = (in.packed >> 18) & 7;
+	let color_index = in.packed >> 21;
 
 	const NORMALS = array<vec3<f32>, 6>(
 		vec3(1.0, 0.0, 0.0),

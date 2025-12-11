@@ -17,30 +17,27 @@ use glam::IVec3;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VoxelVertex {
-    /// color_index | normal_index | z | y | x
-    /// ---------------------------------------
-    /// 3             3              6   8   6
+    /// voxel_id | normal_index | z | y | x
+    /// ---------+--------------+---+---+---
+    /// 11       | 3            | 6 | 6 | 6
     packed: u32,
 }
 
 impl VoxelVertex {
     const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32];
 
-    const MAX_XZ: u32 = 63;
-    const MAX_Y: u32 = 255;
+    const MAX_XYZ: u32 = 63;
     const Y_OFFSET: u32 = 6;
-    const Z_OFFSET: u32 = 14;
-
-    const NORMAL_OFFSET: u32 = 20;
-
-    const MAX_COLOR_INDEX: u32 = 3;
-    const COLOR_OFFSET: u32 = 23;
-    const COLOR_MASK: u32 = 0x1800000;
+    const Z_OFFSET: u32 = 12;
+    const NORMAL_OFFSET: u32 = 18;
+    const MAX_ID: u32 = 3;
+    const ID_OFFSET: u32 = 21;
+    const ID_MASK: u32 = 0xff400000;
 
     pub const fn new(x: u32, y: u32, z: u32, normal: IVec3) -> Self {
-        debug_assert!(x <= Self::MAX_XZ);
-        debug_assert!(y <= Self::MAX_Y);
-        debug_assert!(z <= Self::MAX_XZ);
+        debug_assert!(x <= Self::MAX_XYZ);
+        debug_assert!(y <= Self::MAX_XYZ);
+        debug_assert!(z <= Self::MAX_XYZ);
 
         let mut packed = 0;
         packed |= x;
@@ -61,27 +58,10 @@ impl VoxelVertex {
         Self { packed }
     }
 
-    pub fn offset(&mut self, x: u32, y: u32, z: u32) {
-        let packed = self.packed;
-        let x = (packed & 0x3f) + x;
-        let y = ((packed >> Self::Y_OFFSET) & 0xff) + y;
-        let z = ((packed >> Self::Z_OFFSET) & 0x3f) + z;
-
-        debug_assert!(x <= Self::MAX_XZ);
-        debug_assert!(y <= Self::MAX_Y);
-        debug_assert!(z <= Self::MAX_XZ);
-
-        let remaining = packed & !0xFFFFF;
-        self.packed = remaining
-            | (x & 0x3f)
-            | ((y & 0xff) << Self::Y_OFFSET)
-            | ((z & 0x3f) << Self::Z_OFFSET);
-    }
-
-    pub fn set_color(&mut self, color: u32) {
-        debug_assert!(color <= Self::MAX_COLOR_INDEX);
-        let packed = self.packed & !Self::COLOR_MASK;
-        self.packed = packed | (color << Self::COLOR_OFFSET);
+    pub fn id(&mut self, id: u32) {
+        debug_assert!(id <= Self::MAX_ID);
+        let packed = self.packed & !Self::ID_MASK;
+        self.packed = packed | (id << Self::ID_OFFSET);
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -93,6 +73,8 @@ impl VoxelVertex {
     }
 }
 
+// TODO: Voxel vertices should store a size value for x, y, and z to represent how
+// scaled they are, instead of specifying here.
 pub const VOXEL_FACES: [[VoxelVertex; 4]; 6] = [
     // Back face
     [

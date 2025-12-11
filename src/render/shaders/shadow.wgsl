@@ -11,9 +11,9 @@ struct Chunk {
 var<uniform> chunk: Chunk;
 
 struct VertexInput {
-    /// color_index | normal_index | z | y | x
-    /// ---------------------------------------
-    /// 1             3              5   8   5
+    /// voxel_id | normal_index | z | y | x
+    /// ---------+--------------+---+---+---
+    /// 11       | 3            | 6 | 6 | 6
     @location(0) packed: u32,
 };
 
@@ -26,8 +26,8 @@ fn vs_main(
     in: VertexInput,
 ) -> VertexOutput {
 	let x = f32(in.packed & 0x3f);
-	let y = f32((in.packed >> 6) & 0xff);
-	let z = f32((in.packed >> 14) & 0x3f);
+	let y = f32((in.packed >> 6) & 0x3f);
+	let z = f32((in.packed >> 12) & 0x3f);
 
     var out: VertexOutput;
 	let model_position = vec3(x, y, z) + chunk.position;

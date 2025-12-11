@@ -26,9 +26,9 @@ fn vs_main(
     in: VertexInput,
 ) -> VertexOutput {
 	let x = f32(in.packed & 0x3f);
-	let y = f32((in.packed >> 6) & 0xff);
-	let z = f32((in.packed >> 14) & 0x3f);
-	let color_index = (in.packed >> 23) & 1;
+	let y = f32((in.packed >> 6) & 0x3f);
+	let z = f32((in.packed >> 12) & 0x3f);
+	let color_index = (in.packed >> 21) & 1;
 
 	const COLORS = array<vec3<f32>, 2>(
 		vec3(1.0, 1.0, 1.0),
